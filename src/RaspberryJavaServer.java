@@ -22,8 +22,7 @@ public class RaspberryJavaServer {
         prop.load(fis);
         Encryption.setKey(prop.getProperty("key"));
         PORT = Integer.parseInt(prop.getProperty("PORT"));
-        PostgreSQL postgreSQL = new PostgreSQL();
-        postgreSQL.connect(prop.getProperty("connectionString"));
+        PostgreSQL postgreSQL = new PostgreSQL(prop.getProperty("connectionString"));
         ServerSocket s = new ServerSocket(PORT);
         System.out.println("Server Started");
         Clients clt = new Clients();
@@ -47,15 +46,17 @@ public class RaspberryJavaServer {
         } finally {
             s.close();
             CentralCommand.terminate();
+            PostgreSQL.terminate();
         }
     }
 }
+
 //...............................................................
 class Clients {
-    private ArrayList<PrintWriter> pW;
+    private final ArrayList<PrintWriter> pW;
 
     public Clients() {
-        pW = new ArrayList<PrintWriter>(10);
+        pW = new ArrayList<>(10);
     }
 
     public synchronized void addC(PrintWriter p) {
@@ -67,9 +68,7 @@ class Clients {
     }
 
     public synchronized void sendC(String s) {
-        Iterator<PrintWriter> itr = pW.iterator();
-        while (itr.hasNext()) {
-            PrintWriter p = (PrintWriter) itr.next();
+        for (PrintWriter p : pW) {
             p.println(s);
         }
     }
@@ -79,12 +78,13 @@ class Clients {
     }
 
 }
+
 //...............................................................
 class Encryption {
 
     private static String key = "xxxxxxxxxxxxxxxx";
 
-    public static void setKey(String k){
+    public static void setKey(String k) {
         key = k;
     }
 
@@ -102,13 +102,10 @@ class Encryption {
             cipher.init(Cipher.ENCRYPT_MODE, skey);
             crypted = cipher.doFinal(input.getBytes());
         } catch (Exception e) {
-            System.out.println(e.toString());
             e.printStackTrace();
         }
 
-        //return new String(Base64.encodeBase64(crypted));
         return new String(Hex.encodeHex(crypted));   //.toUpperCase();
-//        return new String(Base64.encodeBase64(crypted));
     }
 
     public static String decrypt(String input) {
@@ -120,19 +117,16 @@ class Encryption {
 //            output = cipher.doFinal(Base64.decodeBase64(input));
             output = cipher.doFinal(Hex.decodeHex(input.toCharArray()));
         } catch (Exception e) {
-            System.out.println(e.toString());
+            e.printStackTrace();
         }
         String back = null;
         if (output != null) {
             String outputSTR = new String(output);
-            char[] outputCHAR = new char[outputSTR.length()];
             int flag = 0;
             for (int i = 0; i < outputSTR.length(); i++) {
-                outputCHAR[i] = outputSTR.charAt(i);
                 if (outputSTR.charAt(i) == '{') flag++;
                 if (outputSTR.charAt(i) == '}') flag--;
                 if (flag == 0) {
-                    outputCHAR[i + 1] = '\0';
                     back = outputSTR.substring(0, i + 1);
                     break;
                 }
@@ -141,23 +135,32 @@ class Encryption {
         return back;
     }
 }
+
 //...............................................................
-class PostgreSQL{
-    private static String connectionString;
+//ако няколко андроида поискат данни едновременно да има някаква синхронизация
+class PostgreSQL extends Thread {
+    private static volatile boolean loop = true;
+    static Statement statement;
+    static String connectionString;
 
-    protected void connect(String con){
+    PostgreSQL(String con) {
         connectionString = con;
+        start();
+    }
 
-        try(Connection connection = DriverManager.getConnection(connectionString);){
-            if(connection != null){
+    public static void test() {
+        try (Connection connection = DriverManager.getConnection(connectionString)) {
+            if (connection != null) {
                 System.out.println("Connected to PostgreSQL server successfully!");
-            }else {
+                statement = connection.createStatement();
+            } else {
                 System.out.println("Failed to connect to PostgreSQL server...");
             }
-            Statement statement = connection.createStatement();
-            ResultSet resultSet = statement.executeQuery("SELECT VERSION()");
-            if (resultSet.next()){
-                System.out.println(resultSet.getString(1));
+            System.out.println("mid update get data");
+            ResultSet resultSet = statement.executeQuery("SELECT * FROM \"testTable\";");
+            while (resultSet.next()) {
+                String name = resultSet.getString("name");
+                System.out.println(name);
             }
         } catch (SQLException throwables) {
             throwables.printStackTrace();
@@ -165,13 +168,51 @@ class PostgreSQL{
         }
     }
 
+    public void run() {
+        try (Connection connection = DriverManager.getConnection(connectionString)) {
+            if (connection != null) {
+                System.out.println("Connected to PostgreSQL server successfully!");
+                statement = connection.createStatement();
+            } else {
+                System.out.println("Failed to connect to PostgreSQL server...");
+            }
 
+            while (loop) {
+                System.out.println("DB update!");
+
+                try {
+                    ResultSet resultSet = statement.executeQuery("SELECT * FROM \"testTable\";");
+                    while (resultSet.next()) {
+                        String name = resultSet.getString("name");
+                        System.out.println(name);
+                    }
+                } catch (SQLException e) {
+                    e.printStackTrace();
+                }
+
+
+                try {
+                    Thread.sleep(60000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        } catch (SQLException throwables) {
+            throwables.printStackTrace();
+            System.out.println("Error connecting to PostgreSQL server");
+        }
+    }
+
+    public static void terminate() {
+        loop = false;
+    }
 }
+
 //...............................................................
 class ServeOneClient extends Thread {
-    private Socket socket;
-    private BufferedReader in;
-    private PrintWriter out;
+    private final Socket socket;
+    private final BufferedReader in;
+    private final PrintWriter out;
     Clients clt;
     SmartDevices devices;
     JSONParser parser;
@@ -200,26 +241,41 @@ class ServeOneClient extends Thread {
                 System.out.println();
                 System.out.println("Sender: " + ID);
 
-                if (ID >= 500) {
-                    //conntroller input // андроида ще праща стринг с инструкция във 1 променлива във мапа
-                    if(data != null) {
+                /*if (ID >= 500) {        // should be <= or what? !!!!!!
+                    //controller input // андроида ще праща стринг с инструкция във 1 променлива във мапа
+                    if (data != null) {
                         String command = (String) data.get("command");
                         System.out.println(command);
                         if (command != null) {
                             handleCommand(command);
                         }
                     }
-                } else if (ID > 0 && ID < 500){
+                } else if (ID > 0) {
                     //sensors
-                    Iterator<Map.Entry> itr1 = data.entrySet().iterator();
-                    while (itr1.hasNext()) {
-                        Map.Entry pair = itr1.next();
+                    for (Map.Entry pair : (Iterable<Map.Entry>) data.entrySet()) {
                         Storage.mapStorage.put(pair.getKey(), pair.getValue());
                         System.out.println(pair.getKey() + " : " + pair.getValue());
                     }
-                    System.out.println("total number of sockets: " + clt.nCl());
-                    //System.out.println(data);
+
+                }*/
+
+                switch (ID){
+                    case 1:     //bathroom Fan
+                        dataToStorage(data);
+                        //devices.bathroomFan.respond();    //idea if the command is broadcast and not personal
+                        break;
+                    default:    //controller input // андроида ще праща стринг с инструкция във 1 променлива във мапа
+                        if (data != null) {
+                            String command = (String) data.get("command");
+                            System.out.println(command);
+                            if (command != null) {
+                                handleCommand(command);
+                            }
+                        }
                 }
+
+                System.out.println("total number of sockets: " + clt.nCl());
+                //System.out.println(data);
             }
         } catch (IOException e) {
             loop = false;
@@ -227,9 +283,10 @@ class ServeOneClient extends Thread {
             try {
                 loop = false;
                 clt.rmvC(out);
-                System.out.println("disconect a client. Total number " + clt.nCl());
+                System.out.println("disconnect a client. Total number " + clt.nCl());
                 socket.close();
             } catch (IOException e) {
+                e.printStackTrace();
             }
         }
     }
@@ -277,43 +334,62 @@ class ServeOneClient extends Thread {
         return data;
     }
 
+    void dataToStorage(Map data){
+        for (Map.Entry pair : (Iterable<Map.Entry>) data.entrySet()) {
+            Storage.mapStorage.put(pair.getKey(), pair.getValue());
+            System.out.println(pair.getKey() + " : " + pair.getValue());
+        }
+    }
+
     void handleCommand(String command) {
-        if (command.equals("bathroomFanOFF")) {
-            Storage.bathroomFanMode = Storage.Mode.OFF;
-            Storage.mapStorage.put("bathroomFanMode", "off");
-            devices.bathroomFan.switchOFF();
-        } else if (command.equals("bathroomFanON")) {
-            Storage.bathroomFanMode = Storage.Mode.ON;
-            Storage.mapStorage.put("bathroomFanMode", "on");
-            devices.bathroomFan.switchON();
-            System.out.println("Switch bathroom Fan ON");
-        } else if (command.equals("bathroomFanAuto")) {
-            Storage.bathroomFanMode = Storage.Mode.AUTO;
-            Storage.mapStorage.put("bathroomFanMode", "auto");
-        } else if (command.equals("giveData")){
-            JSONObject jo = new JSONObject();
-            jo.put("ID", 999);
-            jo.put("data", Storage.mapStorage);
-            String data = jo.toString();
-            String encrypted = Encryption.encrypt(data);
-            out.println(encrypted);              //only to the client of this thread
-            System.out.println("here is your data");
-            System.out.println(Storage.mapStorage);
+        switch (command) {
+            case "giveData":
+                JSONObject jo = new JSONObject();
+                jo.put("ID", 999);
+                jo.put("data", Storage.mapStorage);
+                String data = jo.toString();
+                String encrypted = Encryption.encrypt(data);
+                out.println(encrypted);              //only to the client of this thread
+                System.out.println("here is your data");
+                System.out.println(Storage.mapStorage);
+                break;
+            case "bathroomFanON":
+                Storage.bathroomFanMode = Storage.Mode.ON;
+                Storage.mapStorage.put("bathroomFanMode", "on");
+                devices.bathroomFan.switchON();
+                break;
+            case "bathroomFanAuto":
+                Storage.bathroomFanMode = Storage.Mode.AUTO;
+                Storage.mapStorage.put("bathroomFanMode", "auto");
+                break;
+            case "bathroomFanOFF":
+                Storage.bathroomFanMode = Storage.Mode.OFF;
+                Storage.mapStorage.put("bathroomFanMode", "off");
+                devices.bathroomFan.switchOFF();
+                break;
+            case "dataDB":
+                System.out.println("data from db");
+                PostgreSQL.test();
+                //handle data and send back to android
         }
     }
 }
+
 //...............................................................
 class Storage {
     enum Mode {ON, OFF, AUTO}
+
     static Map mapStorage = new LinkedHashMap();
     static Mode bathroomFanMode = Mode.AUTO;
     //"bathroomFanMode", "auto"
     //"BathroomFanDelay", 30
 }
+
 //...............................................................
 class CentralCommand extends Thread {
     private static volatile boolean loop = true;
-    int repeatInterval = 100;
+    int repeatInterval = 10; //delay between loops in ms //at 100 arduino cant decrypt in time xD
+    // might have to implement restrictions on broadcasts per sec (if 2 arduinos have to get commands at once)
     SmartDevices devices;
 
     //calls the Control method of all devices and executes it at a certain intervals
@@ -322,10 +398,11 @@ class CentralCommand extends Thread {
         start();
     }
 
+    //automation thread
     public void run() {
         while (loop) {
 
-            if (Storage.bathroomFanMode == Storage.Mode.AUTO){
+            if (Storage.bathroomFanMode == Storage.Mode.AUTO) {
                 devices.bathroomFan.Auto(repeatInterval);
             }
 
@@ -338,10 +415,11 @@ class CentralCommand extends Thread {
         }
     }
 
-    public static void terminate(){
+    public static void terminate() {
         loop = false;
     }
 }
+
 //...............................................................
 class SmartDevices {
     Clients clt;
@@ -355,6 +433,7 @@ class SmartDevices {
 
     }
 }
+
 //...............................................................
 //must test case: manual command given but auto changes state at the last ms
 class BathroomFan {
@@ -362,6 +441,11 @@ class BathroomFan {
 
     JSONObject jo;
     int counterForBathroomFan = 0;
+    int noResponse = 0;
+    int counterSpamDelay = 0;
+    boolean flag = false;
+
+    static int fanCom = 0;
 
     BathroomFan(Clients clt) {
         this.clt = clt;
@@ -369,39 +453,56 @@ class BathroomFan {
 
     public synchronized void Auto(int repeatInterval) {
         Storage.mapStorage.put("bathroomFanMode", "auto");
-        Storage.mapStorage.put("bathroomFanDelay", 30);
-        Double temp = null;
-        Double hum = null;
-        Double light = null;
-        boolean relay = false;
+        Storage.mapStorage.put("bathroomFanDelay", 1);
+        Double bathTemp = null;
+        Double bathHum = null;
+        Double bathLight = null;
+        boolean bathFan = false;
 
-        double BathroomFanDelay = Double.valueOf(Storage.mapStorage.get("bathroomFanDelay").toString()) / ((double) repeatInterval / 1000);
+        double BathroomFanDelay = Double.parseDouble(Storage.mapStorage.get("bathroomFanDelay").toString()) / ((double) repeatInterval / 1000);
+        double spamDelay = 2 / ((double) repeatInterval / 1000);
 
-        if (Storage.mapStorage.get("temp") != null) {
-            temp = Double.valueOf(Storage.mapStorage.get("temp").toString());
+        if (Storage.mapStorage.get("bathTemp") != null) {
+            bathTemp = Double.valueOf(Storage.mapStorage.get("bathTemp").toString());
         }
-        if (Storage.mapStorage.get("hum") != null) {
-            hum = Double.valueOf(Storage.mapStorage.get("hum").toString());
+        if (Storage.mapStorage.get("bathHum") != null) {
+            bathHum = Double.valueOf(Storage.mapStorage.get("bathHum").toString());
         }
-        if (Storage.mapStorage.get("light") != null) {
-            light = Double.valueOf(Storage.mapStorage.get("light").toString());
+        if (Storage.mapStorage.get("bathLight") != null) {
+            bathLight = Double.valueOf(Storage.mapStorage.get("bathLight").toString());
         }
-        if (Storage.mapStorage.get("relay") != null) {
-            relay = (boolean) Storage.mapStorage.get("relay");
+        if (Storage.mapStorage.get("bathFan") != null) {
+            bathFan = (boolean) Storage.mapStorage.get("bathFan");
         }
 
-        if (hum != null && light != null && temp != null) {
-            if ((hum > 60 || light > 10) && relay == false) {
-                switchON();
+        if (bathHum != null && bathLight != null && bathTemp != null) {
+            if ((bathHum > 60 || bathLight >= 0.01) && !bathFan) {
+                //fanCom = 1;
+                if (counterSpamDelay == 0) {
+                    switchON();
+                    counterSpamDelay = (int)spamDelay;
+                }
                 counterForBathroomFan = 0;
-            } else if (hum < 50 && light < 10 && relay == true) {
+            } else if (bathHum < 50 && bathLight < 0.01 && bathFan) {
                 if (counterForBathroomFan >= BathroomFanDelay) {
-                    switchOFF();
+                    //fanCom = 2;
+                    if (counterSpamDelay == 0) {
+                        switchOFF();
+                        counterSpamDelay = (int)spamDelay;
+                    }
                 } else {
                     counterForBathroomFan++;
-                    System.out.println(counterForBathroomFan);
+                    //System.out.println("off delay: " + counterForBathroomFan);
                 }
-            } else if (light > 10) counterForBathroomFan = 0;
+            } else {
+                //fanCom = 0;
+                if (bathLight >= 0.01) counterForBathroomFan = 0;
+            }
+            if (counterSpamDelay > 0) {
+                counterSpamDelay--;
+                //System.out.println("spam: " + counterSpamDelay);
+            }
+
         } else {
             System.out.println("no data from bathroomFan");
         }
@@ -416,9 +517,6 @@ class BathroomFan {
         System.out.println(data);
         String encrypted = Encryption.encrypt(data);
         clt.sendC(encrypted);
-        //System.out.println("Encryption data:" +  encrypted);
-        //String decrypted = Encryption.decrypt(encrypted, key);
-        //System.out.println("Decryption data:" +  decrypted);
     }
 
     public synchronized void switchOFF() {
@@ -430,6 +528,11 @@ class BathroomFan {
         String encrypted = Encryption.encrypt(data);
         clt.sendC(encrypted);
     }
+/*
+    public synchronized void respond(){
+
+    }
+ */
 }
 //...............................................................
 //todo
