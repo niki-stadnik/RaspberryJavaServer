@@ -1,4 +1,5 @@
 import org.apache.commons.codec.binary.Hex;
+import org.flywaydb.core.Flyway;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
@@ -10,19 +11,24 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.security.Security;
 import java.sql.*;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Properties;
 
 //...............................................................
 public class RaspberryJavaServer {
     static int PORT;
 
     public static void main(String[] args) throws IOException {
-        FileInputStream fis = new FileInputStream("src/config.properties");
+        FileInputStream fis = new FileInputStream("src/main/java/config.properties");
         Properties prop = new Properties();
         prop.load(fis);
         Encryption.setKey(prop.getProperty("key"));
         PORT = Integer.parseInt(prop.getProperty("PORT"));
         PostgreSQL postgreSQL = new PostgreSQL(prop.getProperty("connectionString"));
+        Flyway flyway = Flyway.configure().dataSource(prop.getProperty("connection"), prop.getProperty("user"), prop.getProperty("pass")).load();
+        flyway.migrate();
         ServerSocket s = new ServerSocket(PORT);
         System.out.println("Server Started");
         Clients clt = new Clients();
@@ -148,7 +154,8 @@ class PostgreSQL extends Thread {
         start();
     }
 
-    public static void test() {
+    //get data on request
+    public static void getAllData() {
         try (Connection connection = DriverManager.getConnection(connectionString)) {
             if (connection != null) {
                 System.out.println("Connected to PostgreSQL server successfully!");
@@ -168,6 +175,7 @@ class PostgreSQL extends Thread {
         }
     }
 
+    //fill db every minute
     public void run() {
         try (Connection connection = DriverManager.getConnection(connectionString)) {
             if (connection != null) {
@@ -369,7 +377,7 @@ class ServeOneClient extends Thread {
                 break;
             case "dataDB":
                 System.out.println("data from db");
-                PostgreSQL.test();
+                PostgreSQL.getAllData();
                 //handle data and send back to android
         }
     }
@@ -504,7 +512,7 @@ class BathroomFan {
             }
 
         } else {
-            System.out.println("no data from bathroomFan");
+            //System.out.println("no data from bathroomFan");
         }
     }
 
